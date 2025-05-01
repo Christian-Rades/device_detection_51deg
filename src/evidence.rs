@@ -1,23 +1,27 @@
-use std::{ffi::CString, marker::PhantomData, ops::Deref};
+use std::{ffi::CString, marker::PhantomData};
 
 use crate::fiftyone_degrees::{self, fiftyone_degrees_array_fiftyoneDegreesEvidenceKeyValuePair_t};
 
+#[derive(Debug)]
 pub struct Evidence {
     data: EvidenceCollection,
 }
 
+#[derive(Debug)]
 enum EvidenceCollection {
     Empty,
     UserAgentOnly(CString),
     EvidenceKeyValues(Vec<EvidenceItem>),
 }
 
+#[derive(Debug)]
 struct EvidenceItem {
     kind: EvidenceKind,
     field: CString,
     value: CString,
 }
 
+#[derive(Debug)]
 pub enum EvidenceKind {
     HeaderString,
     HeaderIPAddresses,
@@ -35,10 +39,11 @@ impl Default for Evidence {
 }
 
 impl Evidence {
-    pub fn add<T: AsRef<str>>(&mut self, kind: EvidenceKind, field: T, value: T) {
+    pub fn add<T: AsRef<str>>(mut self, kind: EvidenceKind, field: T, value: T) -> Self {
         let field: CString = CString::new(field.as_ref()).expect("error creating c string");
         let value: CString = CString::new(value.as_ref()).expect("error creating c string");
         self.data.add_evidence(kind, field, value);
+        self
     }
 
     pub fn new_with_user_agent<T: AsRef<str>>(ua: T) -> Self {
@@ -54,6 +59,10 @@ impl Evidence {
             EvidenceCollection::UserAgentOnly(_) => 1,
             EvidenceCollection::EvidenceKeyValues(kvs) => kvs.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(&self.data, EvidenceCollection::Empty)
     }
 }
 
@@ -94,12 +103,12 @@ impl EvidenceCollection {
     }
 }
 
-pub struct FiftyoneDegreesKeyValueArray<'a> {
+pub struct EvidenceRef<'a> {
     pub kv_array: *mut fiftyone_degrees_array_fiftyoneDegreesEvidenceKeyValuePair_t,
     backing_store: PhantomData<&'a Evidence>,
 }
 
-impl Drop for FiftyoneDegreesKeyValueArray<'_> {
+impl Drop for EvidenceRef<'_> {
     fn drop(&mut self) {
         unsafe {
             fiftyone_degrees::fiftyoneDegreesEvidenceFree(self.kv_array);
@@ -107,11 +116,11 @@ impl Drop for FiftyoneDegreesKeyValueArray<'_> {
     }
 }
 
-impl<'a> FiftyoneDegreesKeyValueArray<'a> {
+impl<'a> EvidenceRef<'a> {
     pub fn new(evidence: &'a Evidence) -> Self {
         let kv_array =
             unsafe { fiftyone_degrees::fiftyoneDegreesEvidenceCreate(evidence.len() as u32) };
-        // TODO: check for null pointer
+        assert!(!kv_array.is_null());
         match &evidence.data {
             EvidenceCollection::Empty => {}
             EvidenceCollection::UserAgentOnly(ua) => unsafe {
@@ -131,7 +140,7 @@ impl<'a> FiftyoneDegreesKeyValueArray<'a> {
         }
         Self {
             kv_array,
-            backing_store: PhantomData::default(),
+            backing_store: PhantomData,
         }
     }
 }

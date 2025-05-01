@@ -3,16 +3,17 @@ use std::{
     error::Error,
     ffi::{CStr, CString},
     fmt::{Display, Write},
-    mem::MaybeUninit,
+    mem,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    evidence::{Evidence, FiftyoneDegreesKeyValueArray},
+    evidence::{Evidence, EvidenceRef},
     fiftyone_degrees::{
         self, Exception, ResourceManager, fiftyone_degrees_string_t,
-        fiftyoneDegreesResultsHashCreate, fiftyoneDegreesResultsHashFree,
-        fiftyoneDegreesResultsHashFromEvidence, fiftyoneDegreesResultsHashGetValues,
+        fiftyoneDegreesHashGetDeviceIdFromResults, fiftyoneDegreesResultsHashCreate,
+        fiftyoneDegreesResultsHashFree, fiftyoneDegreesResultsHashFromEvidence,
+        fiftyoneDegreesResultsHashGetValues,
     },
 };
 
@@ -24,28 +25,34 @@ pub enum HashConfig {
     SingleLoaded,
 }
 
-pub struct HashManagerBuilder {
+/// A builder to configure the hash engine.
+/// A a path to the hash file is mandatory.
+/// The performance configuration can be set with the `hash_config` function,
+/// `LowMemory` is the default.
+///
+pub struct HashEngineBuilder {
     hash_config: HashConfig,
     hash_file: PathBuf,
     properties: Vec<&'static str>,
 }
 
-pub struct HashManager {
-    manager: UnsafeCell<ResourceManager>,
-    properties: CString,
+/// A wrapper type for the hash device detection.
+/// The engine provides a way to lookup devices based on Evidence.
+pub struct HashEngine {
+    manager: Box<UnsafeCell<ResourceManager>>,
+    _properties: CString,
 }
 
-impl Drop for HashManager {
+impl Drop for HashEngine {
     fn drop(&mut self) {
-        dbg!("drop manager");
-        let mut p = self.manager.into_inner();
         unsafe {
-            fiftyone_degrees::fiftyoneDegreesResourceManagerFree(&mut p);
+            fiftyone_degrees::fiftyoneDegreesResourceManagerFree(self.manager.get_mut());
         }
     }
 }
 
-impl HashManagerBuilder {
+impl HashEngineBuilder {
+    /// Creates a new builder based on the location of the device_detection.hash file.
     pub fn new(hash_file: &Path) -> Self {
         Self {
             hash_config: HashConfig::LowMemory,
@@ -54,33 +61,45 @@ impl HashManagerBuilder {
         }
     }
 
+    /// Sets the performance configuration of the hash engine.
+    /// Defaults to `LowMemory`
     pub fn hash_config(mut self, config: HashConfig) -> Self {
         self.hash_config = config;
         self
     }
 
-    pub fn init(self) -> Result<HashManager, HashManagerError> {
-        let mut manager = MaybeUninit::<ResourceManager>::uninit();
-        let mut exception = fiftyone_degrees::Exception::default();
+    /// Sets the device properties that are returned by the hash engine.
+    /// Defaults to all properties available.
+    /// See: [51Degrees Docs](https://51degrees.com/device-detection-cxx/4.4/group___fifty_one_degrees_properties.html#gafe718e9dd0c8b93c755337a6f17b2b60)
+    ///
+    pub fn set_properties(mut self, properties: &[&'static str]) -> Self {
+        self.properties = properties.to_vec();
+        self
+    }
+
+    /// Allocates and initializes the hash engine.
+    pub fn init(self) -> Result<HashEngine, HashManagerError> {
         let data_file = CString::new(self.hash_file.as_os_str().as_encoded_bytes())
             .expect("path to cstring conversion failed");
 
         let mut buf: String = String::default();
 
         for item in &self.properties {
-            if buf.len() > 0 {
+            if !buf.is_empty() {
                 buf.write_str(",").expect("writing to property buffer");
             }
 
             buf.write_str(item).expect("writing to property buffer");
         }
 
+        let mut manager = Box::new(UnsafeCell::new(unsafe { mem::zeroed::<ResourceManager>() }));
         let properties = CString::new(buf).expect("allocating a new properties string");
 
+        let mut exception = fiftyone_degrees::Exception::default();
         let status = unsafe {
             let mut default = fiftyone_degrees::fiftyoneDegreesPropertiesDefault;
 
-            if self.properties.len() > 0 {
+            if !self.properties.is_empty() {
                 default.string = properties.as_ptr();
             }
 
@@ -94,7 +113,7 @@ impl HashManagerBuilder {
             };
 
             fiftyone_degrees::fiftyoneDegreesHashInitManagerFromFile(
-                manager.as_mut_ptr(),
+                manager.get_mut(),
                 &mut config,
                 &mut default,
                 data_file.as_ptr(),
@@ -114,14 +133,15 @@ impl HashManagerBuilder {
             });
         }
 
-        Ok(HashManager {
-            manager: unsafe { manager.assume_init()) },
-            properties,
+        Ok(HashEngine {
+            manager,
+            _properties: properties,
         })
     }
 }
 
-impl<'a> HashManager {
+impl<'a> HashEngine {
+    /// Allocates and fills a result with the evidence provided.
     pub fn process(&'a self, evidence: &'_ Evidence) -> Result<ResultsHash<'a>, HashManagerError> {
         let max_len = evidence.len() as u32;
         let result_ptr = unsafe {
@@ -133,10 +153,14 @@ impl<'a> HashManager {
             });
         }
 
-        let kv_array = FiftyoneDegreesKeyValueArray::new(evidence);
+        let evidence_ref = EvidenceRef::new(evidence);
         let mut exception = Exception::default();
         unsafe {
-            fiftyoneDegreesResultsHashFromEvidence(result_ptr, kv_array.kv_array, &mut exception)
+            fiftyoneDegreesResultsHashFromEvidence(
+                result_ptr,
+                evidence_ref.kv_array,
+                &mut exception,
+            )
         };
 
         if !exception.is_ok() {
@@ -145,13 +169,13 @@ impl<'a> HashManager {
             });
         }
 
-        return Ok(ResultsHash {
+        Ok(ResultsHash {
             result_ptr,
             manager: self,
-        });
+        })
     }
 
-    pub fn get_property_index(&self, property: &'static str) -> i32 {
+    fn get_property_index(&self, property: &'static str) -> i32 {
         let dataset_ref =
             unsafe { fiftyone_degrees::fiftyoneDegreesDataSetGet(self.manager.get().cast()) };
 
@@ -166,7 +190,8 @@ impl<'a> HashManager {
         unsafe {
             fiftyone_degrees::fiftyoneDegreesDataSetRelease(dataset_ref);
         }
-        return index;
+
+        index
     }
 }
 
@@ -180,7 +205,7 @@ impl Display for HashManagerError {
         match self.kind {
             HashManagerErrorKind::Init(_) | HashManagerErrorKind::WithoutException(_) => write!(
                 f,
-                "error initializeing the fiftyoneDegrees resource manager."
+                "error initializing the fiftyoneDegrees resource manager."
             ),
             HashManagerErrorKind::AllocatingResult | HashManagerErrorKind::Process(_) => {
                 write!(f, "error proccessing the evidence")
@@ -220,15 +245,15 @@ impl Display for ErrStatus {
 }
 impl Error for ErrStatus {}
 
+/// A wrapper type for the ResultsHash provided by the hash engine.
 pub struct ResultsHash<'a> {
     result_ptr: *mut fiftyone_degrees::ResultsHash,
-    manager: &'a HashManager,
+    manager: &'a HashEngine,
 }
 
 impl Drop for ResultsHash<'_> {
     fn drop(&mut self) {
         unsafe {
-            dbg!("drop result");
             fiftyoneDegreesResultsHashFree(self.result_ptr);
         }
     }
@@ -236,17 +261,43 @@ impl Drop for ResultsHash<'_> {
 
 impl<'a, 'b> ResultsHash<'a>
 where
-    'a: 'a,
+    'a: 'b,
 {
-    pub fn get_value_as_str(&'b self, property: &'static str) -> Option<&'b str> {
+    /// Looks up the 51 Degrees device ID and returns a copy.
+    pub fn get_device_id(&'b mut self) -> Option<String> {
+        let mut id_buf = [0u8; 512];
+        let mut exception = Exception::default();
+        unsafe {
+            fiftyoneDegreesHashGetDeviceIdFromResults(
+                self.result_ptr,
+                id_buf.as_mut_ptr() as *mut i8,
+                id_buf.len(),
+                &mut exception,
+            ) as usize
+        };
+
+        if !exception.is_ok() {
+            return None;
+        }
+        let Ok(ids) = CStr::from_bytes_until_nul(&id_buf) else {
+            return None;
+        };
+        ids.to_str().ok().map(str::to_string)
+    }
+
+    /// Returns a reference to the value of the given property.
+    /// Returns None in case the property does not exist or the engine was configured
+    /// to ignore the requested property.
+    pub fn get_str(&'b mut self, property: &'static str) -> Option<&'b str> {
         let index = self.manager.get_property_index(property);
         let mut exception = Exception::default();
         let collection =
             unsafe { fiftyoneDegreesResultsHashGetValues(self.result_ptr, index, &mut exception) };
-        if collection.is_null() {
+
+        if !exception.is_ok() {
             return None;
         }
-        if !exception.is_ok() {
+        if collection.is_null() {
             return None;
         }
         if unsafe { (*self.result_ptr).values.count } == 0 {
@@ -264,7 +315,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::evidence::{Evidence, FiftyoneDegreesKeyValueArray};
+    use crate::evidence::Evidence;
 
     use super::*;
 
@@ -272,17 +323,32 @@ mod tests {
     fn smoke_test() {
         let file: PathBuf =
             "device-detection-cxx/device-detection-data/51Degrees-LiteV4.1.hash".into();
-        let manager = HashManagerBuilder::new(&file)
+        let manager = HashEngineBuilder::new(&file)
             .hash_config(HashConfig::HighPerformance)
             .init()
             .unwrap();
         let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.2 Mobile/15E148 Safari/604.1";
 
         let evidence = Evidence::new_with_user_agent(ua);
-        let results = manager.process(&evidence).unwrap();
-        let res = results.get_value_as_str("PlatformName");
+        let mut results = manager.process(&evidence).unwrap();
+        let res = results.get_str("PlatformName");
         assert_eq!(res, Some("iOS"));
-        dbg!(res);
-        assert!(manager.get_property_index("PlatformName") > 0);
+    }
+
+    #[test]
+    fn custom_properties() {
+        let file: PathBuf =
+            "device-detection-cxx/device-detection-data/51Degrees-LiteV4.1.hash".into();
+        let manager = HashEngineBuilder::new(&file)
+            .hash_config(HashConfig::HighPerformance)
+            .set_properties(&["IsMobile"])
+            .init()
+            .unwrap();
+        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.2 Mobile/15E148 Safari/604.1";
+
+        let evidence = Evidence::new_with_user_agent(ua);
+        let mut results = manager.process(&evidence).unwrap();
+        let res = results.get_str("IsMobile");
+        assert_eq!(res, Some("True"));
     }
 }

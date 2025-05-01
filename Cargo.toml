@@ -3,7 +3,17 @@ name = "device_detection_51deg"
 version = "0.1.0"
 edition = "2024"
 
+[[bench]]
+name = "evidence_20k"
+harness = false
+
 [dependencies]
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+criterion = "0.5"
+anyhow = "1.0.98"
 
 [build-dependencies]
 bindgen = "0.71.1"

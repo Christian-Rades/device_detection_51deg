@@ -1,10 +1,10 @@
+#![allow(clippy::all)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(unused)]
 // bindgen issue? https://github.com/rust-lang/rust-bindgen/issues/3147
 #![allow(unsafe_op_in_unsafe_fn)]
-
 use std::{
     error::{self, Error},
     ffi::{CStr, CString, c_void},
@@ -49,6 +49,9 @@ impl Exception {
 }
 
 impl Error for Exception {}
+// Exception only contains static information
+unsafe impl Sync for Exception {}
+unsafe impl Send for Exception {}
 
 #[cfg(test)]
 mod tests {

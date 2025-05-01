@@ -1,100 +1,109 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
+//! # Rust wraper for the 51 Degrees device detection
+//! This wrapper allows the creation and usage of the 51 Degrees device detection hash engine.
+//! ## Getting started:
+//! ```no_run
+//! use std::{path::PathBuf, str::FromStr};
+//!
+//! use device_detection_51deg::{
+//!     evidence::{Evidence, EvidenceKind},
+//!     hash_engine::{HashConfig, HashEngineBuilder},
+//! };
+//!
+//! // Lite hash for demo purposes
+//! let file: PathBuf = "51Degrees-LiteV4.1.hash".into();
+//! let manager = HashEngineBuilder::new(&file)
+//!     .hash_config(HashConfig::HighPerformance)
+//!     .init()
+//!     .unwrap();
+//!
+//! let evidence = Evidence::new_with_user_agent(
+//! "Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.2 Mobile/15E148 Safari/604.1"
+//! );
+//!
+//! let mut results = manager.process(&evidence).unwrap();
+//! let res = results.get_str("PlatformName");
+//!
+//! assert_eq!(res, Some("iOS"));
+//! ```
+//! ## Configuration
+//! Currently switching between hash configs and defining a list of result properties is
+//! implemented.
+//! Peformance can be switched between:
+//! - HighPerformance
+//! - InMemory
+//! - Balanced
+//! - LowMemory
+//!
+//! With the first config being the fastest at the expense of memory footprint and
+//! the last being the opposite.
+//!
+//! Properties are a list of static strings that define the values that are put into the result
+//! during the processing of the evidence.
+//! Limiting the device properties in the result can help speed up the processing of the evidence.
 
-mod fiftyone_degrees;
-pub mod hash_manager;
 pub mod evidence;
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod fiftyone_degrees;
+pub mod hash_engine;
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, fs, path::PathBuf, str::FromStr};
+
+    use crate::evidence::Evidence;
+
     use super::*;
-    use core::str;
-    use std::ffi::CStr;
-    use std::mem::MaybeUninit;
-    use std::ptr;
 
     #[test]
-    fn smoke_test() {
-        unsafe {
-            let mut manager = MaybeUninit::<fiftyone_degrees::ResourceManager>::uninit();
-            let mut exception = fiftyone_degrees::Exception {
-                file: ptr::null(),
-                func: ptr::null(),
-                line: -1,
-                status:
-                    fiftyone_degrees::e_fiftyone_degrees_status_code_FIFTYONE_DEGREES_STATUS_NOT_SET,
-            };
-            let mut default = fiftyone_degrees::fiftyoneDegreesPropertiesDefault;
-            let mut config = fiftyone_degrees::fiftyoneDegreesHashHighPerformanceConfig;
-            let data_file = c"device-detection-cxx/device-detection-data/51Degrees-LiteV4.1.hash";
+    fn full_test() {
+        let mut test_file = PathBuf::from_str(
+            "device-detection-cxx/device-detection-data/20000 Evidence Records.yml",
+        )
+        .unwrap();
 
-            let status = fiftyone_degrees::fiftyoneDegreesHashInitManagerFromFile(
-                manager.as_mut_ptr(),
-                &mut config,
-                &mut default,
-                data_file.as_ptr(),
-                &mut exception,
-            );
-            let mut manager = manager.assume_init();
-            assert_eq!(status, fiftyone_degrees::EXIT_SUCCESS);
-            assert_eq!(
-                exception.status,
-                fiftyone_degrees::e_fiftyone_degrees_status_code_FIFTYONE_DEGREES_STATUS_NOT_SET
-            );
-            assert!(!manager.active.is_null());
+        let Ok(test_data) = fs::read_to_string(&test_file) else {
+            // TODO: find a better way to split tests into fast and slow
+            return;
+        };
 
-            let results = fiftyone_degrees::fiftyoneDegreesResultsHashCreate(&mut manager, 1, 0);
-            let evidence = fiftyone_degrees::fiftyoneDegreesEvidenceCreate(1);
+        let mut cases: Vec<HashMap<String, String>> = Vec::default();
 
-            let name = c"user-agent";
-            let ua = c"Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.2 Mobile/15E148 Safari/604.1";
+        for part in test_data.split("---") {
+            if part.is_empty() {
+                continue;
+            }
+            cases.push(serde_yaml::from_str(part).unwrap());
+        }
+        let cases_evidence: Vec<Evidence> = cases
+            .iter()
+            .map(|record| {
+                let mut evidence = Evidence::default();
+                for (key, value) in record {
+                    let field = key
+                        .strip_prefix("header.")
+                        .expect("all hints should be headers");
+                    evidence = evidence.add(evidence::EvidenceKind::HeaderString, field, value)
+                }
+                evidence
+            })
+            .collect();
 
+        let hash_engine = hash_engine::HashEngineBuilder::new(
+            &PathBuf::from_str(
+                "device-detection-cxx/device-detection-data/51Degrees-LiteV4.1.hash",
+            )
+            .unwrap(),
+        )
+        .init()
+        .inspect_err(|e| {
+            dbg!(format!("{}", e));
+        })
+        .expect("building the engine should work");
 
-            fiftyone_degrees::fiftyoneDegreesEvidenceAddString(
-                evidence, 
-                fiftyone_degrees::e_fiftyone_degrees_evidence_prefix_FIFTYONE_DEGREES_EVIDENCE_HTTP_HEADER_STRING, 
-                name.as_ptr(),
-                ua.as_ptr()
-            );
-
-            let mut exception = fiftyone_degrees::Exception {
-                file: ptr::null(),
-                func: ptr::null(),
-                line: -1,
-                status:
-                    fiftyone_degrees::e_fiftyone_degrees_status_code_FIFTYONE_DEGREES_STATUS_NOT_SET,
-            };
-
-            fiftyone_degrees::fiftyoneDegreesResultsHashFromEvidence(results, evidence, &mut exception);
-            assert_eq!(
-                exception.status,
-                fiftyone_degrees::e_fiftyone_degrees_status_code_FIFTYONE_DEGREES_STATUS_NOT_SET
-            );
-
-            let dataset_ref = fiftyone_degrees::fiftyoneDegreesDataSetGet(&mut manager);
-            let property_name = c"PlatformName";
-            let property_index = fiftyone_degrees::fiftyoneDegreesPropertiesGetRequiredPropertyIndexFromName((*dataset_ref).available, property_name.as_ptr());
-            fiftyone_degrees::fiftyoneDegreesDataSetRelease(dataset_ref);
-            assert!(fiftyone_degrees::fiftyoneDegreesResultsHashGetHasValues(results, property_index, &mut exception),"{:?}",
-            CStr::from_ptr(fiftyone_degrees::fiftyoneDegreesResultsHashGetNoValueReasonMessage(fiftyone_degrees::fiftyoneDegreesResultsHashGetNoValueReason(results, property_index, &mut exception)))
-            );
-
-            let mut value_buffer: [u8; 1024]= [0; 1024];
-
-            let n = fiftyone_degrees::fiftyoneDegreesResultsHashGetValuesString(results, property_name.as_ptr(), value_buffer.as_mut_ptr() as *mut i8, value_buffer.len(), c",".as_ptr(), &mut exception);
-
-            assert_eq!(
-                exception.status,
-                fiftyone_degrees::e_fiftyone_degrees_status_code_FIFTYONE_DEGREES_STATUS_NOT_SET
-            );
-
-            let value = str::from_utf8(&value_buffer[0..n]).unwrap();
-            assert_eq!(value, "iOS");
+        for evidence in cases_evidence {
+            let mut result = hash_engine
+                .process(&evidence)
+                .expect("processing evidence to work");
+            assert!(result.get_device_id().is_some_and(|id| id.len() > 0))
         }
     }
 }

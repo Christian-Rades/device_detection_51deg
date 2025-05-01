@@ -17,9 +17,6 @@ fn scan(build: &mut Build, path: &str, suffix: &str) {
 }
 
 fn main() {
-    // println!("cargo:rerun-if-changed=src/shim/wrapper.h");
-    // println!("cargo:rerun-if-changed=src/shim/wrapper.c");
-
     let mut c = cc::Build::new();
     c.warnings(false);
 
