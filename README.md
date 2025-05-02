@@ -23,10 +23,10 @@ Peformance can be switched between:
 - InMemory
 - Balanced
 - LowMemory
-//!
+
 With the first config being the fastest at the expense of memory footprint and
 the last being the opposite.
-//!
+
 Properties are a list of static strings that define the values that are put into the result
 during the processing of the evidence.
 Limiting the device properties in the result can help speed up the processing of the evidence.
