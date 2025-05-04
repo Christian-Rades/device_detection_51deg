@@ -33,6 +33,7 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header("device-detection-cxx/src/hash/fiftyone.h")
+        .blocklist_var("FP_.*")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
