@@ -17,7 +17,14 @@ fn scan(build: &mut Build, path: &str, suffix: &str) {
 }
 
 fn main() {
+    if cfg!(target_arch = "x86_64") {
+        println!("cargo:rustc-link-lib=atomic");
+        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+        println!("cargo:rustc-link-arg=-Wl,--no-as-needed,-latomic");
+    }
+
     let mut c = cc::Build::new();
+    c.flag_if_supported("-mcx16");
     c.warnings(false);
 
     scan(&mut c, "./device-detection-cxx/src/", ".c");
