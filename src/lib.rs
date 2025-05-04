@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn full_test() {
-        let mut test_file = PathBuf::from_str(
+        let test_file = PathBuf::from_str(
             "device-detection-cxx/device-detection-data/20000 Evidence Records.yml",
         )
         .unwrap();
